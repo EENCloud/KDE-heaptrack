@@ -32,6 +32,24 @@ set_target_properties(heaptrack_env PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/${LIBEXEC_INSTALL_DIR}"
 )
 
+# jdictos/prom-metrics-export: live per-file / per-file+line Prometheus
+# export via libeen, adjunct to heaptrack's own trace-file output.
+set(EEN_ROOT "/opt/een" CACHE PATH "libeen install prefix (for prom_metrics.h / libeen.a)")
+find_library(EEN_LIBRARY NAMES een PATHS "${EEN_ROOT}/lib" REQUIRED)
+find_library(CPPTRACE_LIBRARY NAMES cpptrace PATHS "${EEN_ROOT}/lib" "${EEN_ROOT}/x64-linux/lib" REQUIRED)
+find_library(DWARF_LIBRARY NAMES dwarf PATHS "${EEN_ROOT}/lib" "${EEN_ROOT}/x64-linux/lib")
+find_library(ZSTD_LIBRARY_FOR_DWARF NAMES zstd PATHS "${EEN_ROOT}/lib" "${EEN_ROOT}/x64-linux/lib")
+find_library(GLIB_LIBRARY NAMES glib-2.0 PATHS "${EEN_ROOT}/lib" REQUIRED)
+
+add_library(prom_export STATIC prom_export.cpp)
+target_include_directories(prom_export PRIVATE
+    "${EEN_ROOT}/include"
+    "${EEN_ROOT}/include/glib-2.0"
+    "${EEN_ROOT}/lib/glib-2.0/include"
+)
+set_property(TARGET prom_export PROPERTY POSITION_INDEPENDENT_CODE ON)
+set_property(TARGET prom_export PROPERTY CXX_STANDARD 17)
+
 # heaptrack_preload: track a newly started process
 add_library(heaptrack_preload MODULE
     heaptrack_preload.cpp
@@ -43,6 +61,12 @@ target_link_libraries(heaptrack_preload LINK_PRIVATE
     ${CMAKE_THREAD_LIBS_INIT}
     ${LIBUTIL_LIBRARY}
     heaptrack_unwind
+    prom_export
+    ${EEN_LIBRARY}
+    ${CPPTRACE_LIBRARY}
+    ${DWARF_LIBRARY}
+    ${ZSTD_LIBRARY_FOR_DWARF}
+    ${GLIB_LIBRARY}
     rt
 )
 

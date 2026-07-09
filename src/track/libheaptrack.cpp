@@ -39,6 +39,7 @@
 #include <string>
 #include <thread>
 
+#include "prom_export.h"
 #include "tracetree.h"
 #include "util/config.h"
 #include "util/libunwind_config.h"
@@ -521,6 +522,8 @@ public:
 
     void handleMalloc(void* ptr, size_t size, const Trace& trace)
     {
+        promExport::recordAlloc(ptr, size, trace);
+
         if (!s_data || !s_data->out.canWrite()) {
             return;
         }
@@ -547,6 +550,8 @@ public:
 
     void handleFree(void* ptr)
     {
+        promExport::recordFree(ptr);
+
         if (!s_data || !s_data->out.canWrite()) {
             return;
         }
