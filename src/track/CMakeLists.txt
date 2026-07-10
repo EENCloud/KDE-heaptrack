@@ -42,7 +42,7 @@ set_target_properties(heaptrack_env PROPERTIES
 # install tree, not an ad hoc path.
 if (HEAPTRACK_ENABLE_PROM_METRICS)
     een_add_library(prom_export TYPE STATIC FILES prom_export.cpp)
-    een_ports_link(prom_export PRIVATE libeen libeen-cpp[core])
+    een_ports_link(prom_export PRIVATE libeen)
     target_compile_definitions(prom_export PUBLIC HEAPTRACK_ENABLE_PROM_METRICS)
     set_property(TARGET prom_export PROPERTY POSITION_INDEPENDENT_CODE ON)
 endif()
