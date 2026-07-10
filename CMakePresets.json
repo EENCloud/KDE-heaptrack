@@ -1,0 +1,67 @@
+{
+  "version": 4,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 22
+  },
+  "configurePresets": [
+    {
+      "name": "default",
+      "generator": "Ninja Multi-Config",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "release;debug;tsan;asan",
+        "CMAKE_MAP_IMPORTED_CONFIG_TSAN": ";tsan;release",
+        "CMAKE_MAP_IMPORTED_CONFIG_ASAN": ";asan;release",
+        "CMAKE_DISABLE_PRECOMPILE_HEADERS": "Off",
+        "CMAKE_ARCHIVE_OUTPUT_DIRECTORY": "${sourceDir}/build",
+        "CMAKE_RUNTIME_OUTPUT_DIRECTORY": "${sourceDir}/build",
+        "CMAKE_CXX_STANDARD": "26",
+        "CMAKE_CXX_EXTENSIONS": "On",
+        "CMAKE_SUPPRESS_DEVELOPER_WARNINGS": "On",
+        "THREADS_PREFER_PTHREAD_FLAG": "On",
+        "VCPKG_MANIFEST_MODE": "Off",
+        "HEAPTRACK_BUILD_GUI": "Off",
+        "HEAPTRACK_BUILD_INTERPRET": "Off",
+        "VCPKG_INSTALLED_DIR": "$env{VCPKG_INSTALLED_DIR}",
+        "CMAKE_MODULE_PATH": "$env{VCPKG_INSTALLED_DIR}/share",
+        "CMAKE_INSTALL_PREFIX": "$env{VCPKG_INSTALLED_DIR}",
+        "CMAKE_PREFIX_PATH": "$env{VCPKG_INSTALLED_DIR}"
+      },
+      "environment": {
+        "CCACHE_DEPEND": "true",
+        "CCACHE_SLOPPINESS": "pch_defines,time_macros,include_file_ctime,include_file_mtime"
+      }
+    },
+    {
+      "name": "linux",
+      "hidden": false,
+      "description": "Build linux with GCC compiler",
+      "inherits": "default"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "linux",
+      "configuration": "debug"
+    },
+    {
+      "name": "release",
+      "configurePreset": "linux",
+      "configuration": "release"
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "linux",
+      "configuration": "tsan"
+    },
+    {
+      "name": "asan",
+      "configurePreset": "linux",
+      "configuration": "asan"
+    }
+  ]
+}

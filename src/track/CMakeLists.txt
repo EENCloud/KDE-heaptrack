@@ -33,27 +33,20 @@ set_target_properties(heaptrack_env PROPERTIES
 )
 
 # jdictos/prom-metrics-export: live per-file / per-file+line Prometheus
-# export via libeen, adjunct to heaptrack's own trace-file output.
-set(EEN_ROOT "/opt/een" CACHE PATH "libeen install prefix (for prom_metrics.h / libeen.a)")
-find_library(EEN_LIBRARY NAMES een PATHS "${EEN_ROOT}/lib" REQUIRED)
-find_library(CPPTRACE_LIBRARY NAMES cpptrace PATHS "${EEN_ROOT}/lib" "${EEN_ROOT}/x64-linux/lib" REQUIRED)
-find_library(DWARF_LIBRARY NAMES dwarf PATHS "${EEN_ROOT}/lib" "${EEN_ROOT}/x64-linux/lib")
-find_library(ZSTD_LIBRARY_FOR_DWARF NAMES zstd PATHS "${EEN_ROOT}/lib" "${EEN_ROOT}/x64-linux/lib")
-find_library(GLIB_LIBRARY NAMES glib-2.0 PATHS "${EEN_ROOT}/lib" REQUIRED)
-
-add_library(prom_export STATIC prom_export.cpp)
-target_include_directories(prom_export PRIVATE
-    "${EEN_ROOT}/include"
-    "${EEN_ROOT}/include/glib-2.0"
-    "${EEN_ROOT}/lib/glib-2.0/include"
-)
+# export via libeen, adjunct to heaptrack's own trace-file output. Linked
+# through een_ports_link (not raw find_library) so this resolves against
+# the exact same libeen/glib build that the process being watched already
+# uses -- a second, independently-linked glib instance in the same process
+# crashes very early (confirmed while prototyping this against a real
+# een-cmake binary), so this dependency MUST come from the same een-ports
+# install tree, not an ad hoc path.
+een_add_library(prom_export TYPE STATIC FILES prom_export.cpp)
+een_ports_link(prom_export PRIVATE libeen libeen-cpp[core])
 set_property(TARGET prom_export PROPERTY POSITION_INDEPENDENT_CODE ON)
-set_property(TARGET prom_export PROPERTY CXX_STANDARD 17)
 
 # heaptrack_preload: track a newly started process
-add_library(heaptrack_preload MODULE
-    heaptrack_preload.cpp
-    libheaptrack.cpp
+een_add_library(heaptrack_preload TYPE SHARED INSTALL
+    FILES heaptrack_preload.cpp libheaptrack.cpp
 )
 
 target_link_libraries(heaptrack_preload LINK_PRIVATE
@@ -62,11 +55,6 @@ target_link_libraries(heaptrack_preload LINK_PRIVATE
     ${LIBUTIL_LIBRARY}
     heaptrack_unwind
     prom_export
-    ${EEN_LIBRARY}
-    ${CPPTRACE_LIBRARY}
-    ${DWARF_LIBRARY}
-    ${ZSTD_LIBRARY_FOR_DWARF}
-    ${GLIB_LIBRARY}
     rt
 )
 

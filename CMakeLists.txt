@@ -3,6 +3,9 @@ cmake_minimum_required(VERSION 3.16.0)
 project(heaptrack)
 enable_testing()
 
+# Include een cmake apis
+include(een-cmake/api)
+
 if(NOT CMAKE_BUILD_TYPE)
   message(STATUS "Setting build type to 'RelWithDebInfo' as none was specified.")
   set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Choose the type of build." FORCE)
@@ -105,7 +108,12 @@ if (NOT MSVC)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic -Werror=undef -Werror=return-type")
 endif()
 
-set(CMAKE_CXX_STANDARD 17)
+if (NOT CMAKE_CXX_STANDARD)
+    # EEN fork: the een-ports toolchain provides CMAKE_CXX_STANDARD (26) via
+    # CMakePresets.json, matching libeen-cpp/sfio -- only fall back to
+    # upstream heaptrack's own C++17 baseline outside that toolchain.
+    set(CMAKE_CXX_STANDARD 17)
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 
 include (CheckCXXSourceCompiles)

@@ -2,9 +2,11 @@
 
 #include <cpptrace/cpptrace.hpp>
 
-extern "C" {
+// No extern "C" wrapper: prom_metrics.h transitively pulls in genuine C++
+// headers (een/mutex.h -> een/defer.h -> een/Defer.hpp's templates), which
+// cannot have C linkage. archiver's own C++ consumers (via archiver_core.h)
+// include this plainly with no wrapper and it links fine as-is.
 #include <een/prom_metrics.h>
-}
 
 #include <cstdio>
 #include <string>

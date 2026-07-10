@@ -30,3 +30,6 @@ compile_commands.json
 build*/
 *.zst
 *.AppImage
+
+# Claude Code (managed by claude-sync)
+.claude/
