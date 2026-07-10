@@ -97,6 +97,12 @@ option(
 )
 
 option(
+  HEAPTRACK_ENABLE_PROM_METRICS
+  "Export live per-file / per-file+line outstanding allocation metrics via libeen's Prometheus API (adjunct to heaptrack's own offline trace output). Links heaptrack_preload against libeen/libeen-cpp."
+  OFF
+)
+
+option(
   HEAPTRACK_USE_SYSTEM_ROBINMAP
   "Use system robin-map instead of bundled"
   OFF

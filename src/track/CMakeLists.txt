@@ -40,9 +40,12 @@ set_target_properties(heaptrack_env PROPERTIES
 # crashes very early (confirmed while prototyping this against a real
 # een-cmake binary), so this dependency MUST come from the same een-ports
 # install tree, not an ad hoc path.
-een_add_library(prom_export TYPE STATIC FILES prom_export.cpp)
-een_ports_link(prom_export PRIVATE libeen libeen-cpp[core])
-set_property(TARGET prom_export PROPERTY POSITION_INDEPENDENT_CODE ON)
+if (HEAPTRACK_ENABLE_PROM_METRICS)
+    een_add_library(prom_export TYPE STATIC FILES prom_export.cpp)
+    een_ports_link(prom_export PRIVATE libeen libeen-cpp[core])
+    target_compile_definitions(prom_export PUBLIC HEAPTRACK_ENABLE_PROM_METRICS)
+    set_property(TARGET prom_export PROPERTY POSITION_INDEPENDENT_CODE ON)
+endif()
 
 # heaptrack_preload: track a newly started process
 een_add_library(heaptrack_preload TYPE SHARED INSTALL
@@ -54,9 +57,12 @@ target_link_libraries(heaptrack_preload LINK_PRIVATE
     ${CMAKE_THREAD_LIBS_INIT}
     ${LIBUTIL_LIBRARY}
     heaptrack_unwind
-    prom_export
     rt
 )
+
+if (HEAPTRACK_ENABLE_PROM_METRICS)
+    target_link_libraries(heaptrack_preload LINK_PRIVATE prom_export)
+endif()
 
 set_target_properties(heaptrack_preload PROPERTIES
     VERSION ${HEAPTRACK_LIB_VERSION}

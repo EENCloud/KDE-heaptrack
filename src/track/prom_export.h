@@ -16,6 +16,8 @@
 
 namespace promExport {
 
+#ifdef HEAPTRACK_ENABLE_PROM_METRICS
+
 // Idempotent; safe to call multiple times (e.g. lazily on first use).
 void init();
 
@@ -23,6 +25,17 @@ void init();
 // to file:line and aggregated by file and by file+line.
 void recordAlloc(void* ptr, size_t size, const Trace& trace);
 void recordFree(void* ptr);
+
+#else
+
+// Prom metrics export disabled (HEAPTRACK_ENABLE_PROM_METRICS=OFF) -- no-ops,
+// so callers don't need to be built any differently and no libeen linkage
+// is pulled in.
+inline void init() {}
+inline void recordAlloc(void*, size_t, const Trace&) {}
+inline void recordFree(void*) {}
+
+#endif  // HEAPTRACK_ENABLE_PROM_METRICS
 
 }  // namespace promExport
 
