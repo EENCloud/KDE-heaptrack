@@ -42,6 +42,10 @@ usage() {
     echo " --asan          Enables running heaptrack on binaries built with gcc's address sanitizer enabled."
     echo "                 Implies --use-inject."
     echo " --record-only   Only record and interpret the data, do not attempt to analyze it."
+    echo " --prom-metrics  Export live per-file / per-file+line outstanding allocation metrics"
+    echo "                 via libeen's Prometheus API, adjunct to the recorded trace file."
+    echo "                 Only has an effect if this build was compiled with"
+    echo "                 HEAPTRACK_ENABLE_PROM_METRICS; otherwise this is a no-op."
     echo "  ARGUMENT       Any number of arguments that will be passed verbatim"
     echo "                 to the debuggee."
     echo "  -h, --help     Show this help message and exit."
@@ -73,6 +77,7 @@ client=
 use_inject_lib=
 write_raw_data=
 record_only=
+prom_metrics=
 asan=
 asan_ld_preload=
 quiet=
@@ -176,6 +181,10 @@ while true; do
             ;;
         "--record-only")
             record_only=1
+            shift 1
+            ;;
+        "--prom-metrics")
+            prom_metrics=1
             shift 1
             ;;
         "-h" | "--help")
@@ -432,7 +441,7 @@ if [ -z "$debug" ] && [ -z "$pid" ]; then
   if [ -z ${quiet} ]; then
     echo "starting application, this might take some time..."
   fi
-  LD_PRELOAD="$asan_ld_preload$LIBHEAPTRACK_PRELOAD${LD_PRELOAD:+:$LD_PRELOAD}" DUMP_HEAPTRACK_OUTPUT="$pipe" "$client" "$@"
+  LD_PRELOAD="$asan_ld_preload$LIBHEAPTRACK_PRELOAD${LD_PRELOAD:+:$LD_PRELOAD}" DUMP_HEAPTRACK_OUTPUT="$pipe" ${prom_metrics:+HEAPTRACK_PROM_METRICS=1} "$client" "$@"
   EXIT_CODE=$?
 else
   if [ -z "$pid" ]; then
@@ -441,6 +450,7 @@ else
     fi
     gdb --quiet --eval-command="set environment LD_PRELOAD=$LIBHEAPTRACK_PRELOAD" \
         --eval-command="set environment DUMP_HEAPTRACK_OUTPUT=$pipe" \
+        ${prom_metrics:+--eval-command="set environment HEAPTRACK_PROM_METRICS=1"} \
         --eval-command="set startup-with-shell off" \
         --eval-command="run" --args "$client" "$@"
     EXIT_CODE=$?

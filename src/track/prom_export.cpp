@@ -9,6 +9,7 @@
 #include <een/prom_metrics.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <unordered_map>
 
@@ -40,24 +41,31 @@ struct PtrInfo {
 };
 
 bool g_initialized = false;
+bool g_enabled = false;
 size_t g_locationMetricCount = 0;
 
-// address -> "file:line" (or a symbol-name / "<unknown>" fallback),
-// resolved once per unique leaf return address.
-std::unordered_map<uintptr_t, std::pair<std::string, uint32_t>> g_resolvedLeaf;
-
-// ptr -> what we tracked for it, so free() knows what to subtract.
-std::unordered_map<void*, PtrInfo> g_live;
-
-// file -> aggregate (always exported; bounded by distinct source files).
-std::unordered_map<std::string, Aggregate> g_byFile;
-
-// "file:line" -> aggregate (exported up to kMaxLocationMetrics distinct keys).
-std::unordered_map<std::string, Aggregate> g_byLocation;
+// These are pointers, heap-allocated on first use from init(), rather than
+// plain non-trivial globals: a namespace-scope std::unordered_map needs a
+// dynamic initializer that runs from .init_array, and *that* ordering is
+// not guaranteed relative to other shared objects' own constructors. In
+// practice the very first malloc() in a process can come from libstdc++'s
+// own startup (observed via corefile: libstdc++.so.6's constructor calling
+// malloc() during _dl_init, long before this TU's initializer had run) --
+// hitting a not-yet-constructed unordered_map's bucket_count()==0 SIGFPEs
+// on the modulo. A pointer is trivial and zero-initialized for free, so
+// `new`-ing the real map on first actual use (guarded by g_initialized,
+// itself a trivial bool) sidesteps the ordering problem entirely -- and
+// any malloc() that `new` triggers is safe, since it re-enters through
+// RecursionGuard (see heaptrack_malloc()), which just falls through to
+// the real allocator while a tracking call is already in progress.
+std::unordered_map<uintptr_t, std::pair<std::string, uint32_t>>* g_resolvedLeaf;
+std::unordered_map<void*, PtrInfo>* g_live;
+std::unordered_map<std::string, Aggregate>* g_byFile;
+std::unordered_map<std::string, Aggregate>* g_byLocation;
 
 std::pair<std::string, uint32_t> resolveLeaf(uintptr_t address) {
-  auto it = g_resolvedLeaf.find(address);
-  if (it != g_resolvedLeaf.end())
+  auto it = g_resolvedLeaf->find(address);
+  if (it != g_resolvedLeaf->end())
     return it->second;
 
   cpptrace::safe_object_frame safeFrame;
@@ -78,7 +86,7 @@ std::pair<std::string, uint32_t> resolveLeaf(uintptr_t address) {
     }
   }
 
-  g_resolvedLeaf.emplace(address, result);
+  g_resolvedLeaf->emplace(address, result);
   return result;
 }
 
@@ -88,23 +96,36 @@ void init() {
   if (g_initialized)
     return;
   g_initialized = true;
-  // Nothing to eagerly create -- gauges/counters are created lazily,
-  // per-file / per-location, the first time each is seen.
+  // Compiled in doesn't mean active -- `heaptrack --prom-metrics` sets this
+  // env var right before exec'ing the debuggee (see heaptrack.sh.cmake), so
+  // a plain `heaptrack foo` run pays no gauge/map bookkeeping cost at all.
+  g_enabled = getenv("HEAPTRACK_PROM_METRICS") != nullptr;
+  if (!g_enabled)
+    return;
+  g_resolvedLeaf = new std::unordered_map<uintptr_t, std::pair<std::string, uint32_t>>();
+  g_live = new std::unordered_map<void*, PtrInfo>();
+  g_byFile = new std::unordered_map<std::string, Aggregate>();
+  g_byLocation = new std::unordered_map<std::string, Aggregate>();
+  // Gauges/counters themselves are still created lazily, per-file /
+  // per-location, the first time each is seen.
 }
 
 void recordAlloc(void* ptr, size_t size, const Trace& trace) {
   if (!g_initialized)
     init();
 
+  if (!g_enabled)
+    return;
+
   if (trace.size() == 0)
     return;
 
   auto [file, line] = resolveLeaf(reinterpret_cast<uintptr_t>(*trace.begin()));
 
-  g_live[ptr] = PtrInfo{size, file, line};
+  (*g_live)[ptr] = PtrInfo{size, file, line};
 
   {
-    Aggregate& agg = g_byFile[file];
+    Aggregate& agg = (*g_byFile)[file];
     agg.outstandingBytes += static_cast<double>(size);
     if (!agg.bytesGauge) {
       std::string gaugeName = "heaptrack_leaked_bytes_by_file";
@@ -118,14 +139,14 @@ void recordAlloc(void* ptr, size_t size, const Trace& trace) {
 
   if (line > 0) {
     std::string key = file + ":" + std::to_string(line);
-    auto it = g_byLocation.find(key);
-    bool isNew = (it == g_byLocation.end());
+    auto it = g_byLocation->find(key);
+    bool isNew = (it == g_byLocation->end());
     if (isNew && g_locationMetricCount >= kMaxLocationMetrics) {
       // Cap hit -- still track internally isn't worth it without a gauge
       // to report it through, so just skip creating this one.
       return;
     }
-    Aggregate& agg = g_byLocation[key];
+    Aggregate& agg = (*g_byLocation)[key];
     agg.outstandingBytes += static_cast<double>(size);
     if (!agg.bytesGauge) {
       agg.bytesGauge = prom_gauge_new("heaptrack_leaked_bytes_by_location",
@@ -143,14 +164,17 @@ void recordAlloc(void* ptr, size_t size, const Trace& trace) {
 }
 
 void recordFree(void* ptr) {
-  auto it = g_live.find(ptr);
-  if (it == g_live.end())
+  if (!g_live)
+    return;
+
+  auto it = g_live->find(ptr);
+  if (it == g_live->end())
     return;
 
   const PtrInfo& info = it->second;
 
-  auto fileIt = g_byFile.find(info.file);
-  if (fileIt != g_byFile.end()) {
+  auto fileIt = g_byFile->find(info.file);
+  if (fileIt != g_byFile->end()) {
     fileIt->second.outstandingBytes -= static_cast<double>(info.size);
     if (fileIt->second.bytesGauge)
       prom_gauge_set(fileIt->second.bytesGauge, PROM_FLAG_SORTED, fileIt->second.outstandingBytes,
@@ -159,8 +183,8 @@ void recordFree(void* ptr) {
 
   if (info.line > 0) {
     std::string key = info.file + ":" + std::to_string(info.line);
-    auto locIt = g_byLocation.find(key);
-    if (locIt != g_byLocation.end()) {
+    auto locIt = g_byLocation->find(key);
+    if (locIt != g_byLocation->end()) {
       locIt->second.outstandingBytes -= static_cast<double>(info.size);
       if (locIt->second.bytesGauge) {
         std::string lineStr = std::to_string(info.line);
@@ -170,7 +194,7 @@ void recordFree(void* ptr) {
     }
   }
 
-  g_live.erase(it);
+  g_live->erase(it);
 }
 
 }  // namespace promExport
