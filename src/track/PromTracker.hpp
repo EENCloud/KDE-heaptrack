@@ -1,5 +1,7 @@
 #pragma once
 
+#include "trace.h"
+
 #include <cpptrace/cpptrace.hpp>
 
 #include <een/prom_metrics.h>
@@ -112,73 +114,54 @@ public:
     constructed_ = false;
   }
 
+  // True when the calling thread is one of this model's own collator threads
+  // (resolver_ / symbolResolver_ -- DWARF resolution, hash-map growth,
+  // std::string construction, etc). Their allocations are the model's own
+  // overhead, never application memory, so recordAlloc/recordFree drop them
+  // outright: recording them would re-enter the malloc hook on the same
+  // thread with nothing to catch the recursion, and they're this fork's cost,
+  // not the watched program's. This TID check is the whole exclusion.
+  //
+  // Guarded by constructed_ so it's a safe `false` when called (via the
+  // malloc hook, from any thread) before this global's constructor has run
+  // or after its destructor has begun: constructed_ is zero-initialized
+  // (false) ahead of dynamic init and reset to false first thing in the
+  // destructor, and the Thread members it reads are only alive in between.
+  bool isTrackerThread() const {
+    if (!constructed_)
+      return false;
+    return resolver_.id() == TID::current() || symbolResolver_.id() == TID::current();
+  }
+
   void recordAlloc(void* ptr, size_t size, const Trace& trace) {
     // Any call arriving during/after destruction is a no-op -- see
     // constructed_.
     if (!constructed_)
       return;
 
-    if (resolver_.id() == TID::current() || symbolResolver_.id() == TID::current()) {
-      // This allocation was made by one of our own collator threads --
-      // DWARF symbol resolution, hash-map growth, std::string construction,
-      // etc -- not by application code. Rather than silently dropping it
-      // (the old behavior; see recordFree's matching branch), track it as
-      // tracking *overhead* so it shows up as its own metric instead of
-      // vanishing or, worse, quietly inflating application-attributed
-      // numbers.
-      //
-      // Bookkeeping only here (an atomic add, a Locked map insert) -- NO
-      // prom_gauge_set_full call. This branch is reentrant in a way that's
-      // easy to miss: it's also hit for resolver_'s own perfectly ordinary
-      // allocations made *while already inside* one of its top-level
-      // prom_gauge_set_full calls in processAlloc/processFree (e.g.
-      // byFileBytesGauge_'s update triggers a new label's allocation, which
-      // is a fresh, non-nested malloc from heaptrack's point of view -- it
-      // re-enters here). heaptrack's thread_local RecursionGuard::isActive
-      // (libheaptrack.cpp) stops *this function* from being reentered by a
-      // *nested* malloc, but it does nothing to protect a non-reentrant lock
-      // inside prom_metrics' own registry: calling prom_gauge_set_full again
-      // here, on the same thread, while the outer processAlloc call's own
-      // prom_gauge_set_full is still holding that lock waiting on the very
-      // allocation that got us here, is a real self-deadlock -- confirmed
-      // live (resolver_/symbolResolver_ both wedged at 0% CPU, zero
-      // heaptrack_* metrics ever rendered, first production run this shipped
-      // in). The gauge itself is instead updated from resolverLoop's own
-      // top-level drain cycle, which is never called from inside another
-      // prom_metrics call.
-      trackerBytes_ += size;
-      trackerLive_.with([&](auto& map) { map[ptr] = size; });
+    if (isTrackerThread()) {
+      // Allocation made by one of our own collator threads (resolver_/
+      // symbolResolver_ -- DWARF resolution, hash-map growth, std::string
+      // construction, etc), not by application code. Drop it: it is this
+      // fork's own overhead, not a leak we're hunting. Recording it would
+      // re-enter here anyway (the recording itself allocates), and there is
+      // no longer a global lock to catch that recursion -- the TID check is
+      // the whole exclusion. See isTrackerThread.
       return;
     }
 
     if (trace.size() == 0)
       return;
 
-    // heaptrack_malloc/heaptrack_free call this BEFORE HeapTrack::op() takes
-    // HeapTrack::s_lock (heaptrack's single global lock serializing every
-    // malloc/free/realloc in every thread of the watched process) -- not from
-    // inside it. That placement is load-bearing, not incidental: this queue is
-    // already fully self-synchronizing (lock-free MPSC), so it never needed
-    // s_lock's protection, but earlier code called this from handleMalloc/
-    // handleFree, which only run inside op()'s locked callback (for the
-    // unrelated reason that THEY write to heaptrack's own trace file). That
-    // nested it inside s_lock as a pure side effect. Combined with a spin-retry
-    // on a full queue (`while (!tryPush()) {}`, since fixed to a single
-    // non-blocking attempt below), that produced a real, confirmed deadlock:
-    // a producer thread spinning while holding s_lock, waiting for the
-    // resolver thread to drain the queue, while the resolver thread's own
-    // cpptrace/libdwarf symbol resolution allocates memory, re-enters
-    // heaptrack's malloc hook, and blocks trying to acquire that same s_lock
-    // to record its own allocation -- the producer can never release it, the
-    // resolver can never drain. Keep this call outside any lock: do the least
-    // possible work here (copy the raw frame addresses -- already captured by
-    // heaptrack itself, no unwinding done here) and hand off via the queue.
-    // tryPush is non-blocking by design -- if the queue is momentarily full,
-    // the entry is dropped rather than retried. Even with the lock hazard
-    // above removed, a spin-retry here is still wrong: it burns a producer
-    // thread's CPU for no reason once the queue is genuinely saturated.
-    // QueueCapacity is sized generously to make drops rare, but "rare" is the
-    // ceiling on how good this gets, not "never".
+    // Called from the malloc/free hook on every allocation in every thread of
+    // the watched process, so it must be cheap and must never block: copy the
+    // raw frame addresses (already captured by heaptrack's own unwinder -- no
+    // unwinding is done here) into a fixed QueueEntry and hand it to the
+    // resolver thread through the lock-free MPSC queue. tryPush is a single
+    // non-blocking attempt -- if the queue is momentarily full the entry is
+    // dropped, never retried (a spin-retry would just burn a producer thread's
+    // CPU once the queue is genuinely saturated). QueueCapacity is sized
+    // generously to make drops rare, but "rare" is the ceiling, not "never".
     QueueEntry entry;
     entry.isAlloc = true;
     entry.ptr = ptr;
@@ -193,27 +176,9 @@ public:
     if (!constructed_)
       return;
 
-    if (resolver_.id() == TID::current() || symbolResolver_.id() == TID::current()) {
-      // Mirror image of recordAlloc's self-thread branch: look up the size
-      // this same ptr was recorded with (recordFree, unlike recordAlloc,
-      // isn't handed a size by the caller -- see heaptrack_free in
-      // libheaptrack.cpp), subtract it back out, and drop it from
-      // trackerLive_. A miss (ptr not found) is silently ignored -- e.g. a
-      // free for something allocated before constructed_ became true, or
-      // before this tracking existed at all -- same as processFree's live_
-      // lookup does for application pointers. No prom_gauge_set_full call
-      // here -- see recordAlloc's matching branch for why that's a real
-      // self-deadlock hazard, not just an optimization.
-      size_t freedSize = trackerLive_.with([&](auto& map) {
-        size_t found = 0;
-        auto it = map.find(ptr);
-        if (it != map.end()) {
-          found = it->second;
-          map.erase(it);
-        }
-        return found;
-      });
-      trackerBytes_ -= freedSize;
+    if (isTrackerThread()) {
+      // Mirror of recordAlloc: our own collator threads' frees are dropped,
+      // never recorded. See there.
       return;
     }
 
@@ -295,17 +260,6 @@ private:
   // Drains whatever's queued; returns whether it did any work (so the
   // caller knows whether to sleep before checking again).
   bool drainQueue() {
-    // Publish the tracker-overhead gauge here, once per drain cycle, rather
-    // than from recordAlloc/recordFree's self-thread branch that maintains
-    // trackerBytes_ -- this call site is a safe, top-level point (never
-    // itself called from inside another prom_metrics call), unlike that
-    // branch, which can be reentered mid-way through one of processAlloc/
-    // processFree's OWN prom_gauge_set_full calls below and self-deadlock
-    // on prom_metrics' internal registry lock. See recordAlloc's comment on
-    // trackerBytes_ for the full story (confirmed live: both collator
-    // threads wedged at 0% CPU with this called from the wrong place).
-    prom_gauge_set_full(trackerOverheadBytesGauge_, static_cast<double>(trackerBytes_), emptyLabel());
-
     bool did = false;
     while (auto e = queue_.tryPop()) {
       if (e->isAlloc)
@@ -441,7 +395,7 @@ private:
       return;  // nothing usable -- submittedForResolution_ ensures this
                 // address is never retried; see attributionLabel.
 
-    std::lock_guard<std::mutex> guard(resolvedSymbolsMutex_);
+    auto guard = resolvedSymbolsMutex_.acquire();
     resolvedSymbols_[address] = buf;
   }
 
@@ -606,7 +560,7 @@ private:
   // this simple (see byLocation_'s comment: two series briefly existing for
   // the same call site is expected, not a bug to engineer away).
   std::string attributionLabel(uintptr_t address, const ResolvedLoc& loc) {
-    std::lock_guard<std::mutex> guard(resolvedSymbolsMutex_);
+    auto guard = resolvedSymbolsMutex_.acquire();
 
     auto it = resolvedSymbols_.find(address);
     if (it != resolvedSymbols_.end())
@@ -676,26 +630,6 @@ private:
   PromMetric* totalBytesGauge_{prom_gauge_new("heaptrack_leaked_bytes_total", "total outstanding allocated bytes across the whole process")};
   PromMetric* totalAllocCounter_{prom_counter_new("heaptrack_alloc_count_total", "total allocation count across the whole process")};
 
-  // Tracking overhead: bytes currently allocated by this tracker's own
-  // collator threads (resolver_/symbolResolver_ -- DWARF parsing, hash-map
-  // growth, std::string construction, etc), as opposed to bytes allocated
-  // by the watched application. Written from recordAlloc/recordFree's
-  // self-thread branch (see their comments) -- NOT via the queue_/
-  // processAlloc/processFree path application allocations go through, since
-  // self-allocations are deliberately never enqueued.
-  PromMetric* trackerOverheadBytesGauge_{prom_gauge_new("heaptrack_tracker_overhead_bytes", "bytes currently allocated by the tracking system's own collator threads (DWARF symbol resolution, hash-map growth, etc), not attributed to application code")};
-  std::atomic<size_t> trackerBytes_{0};
-
-  // ptr -> size for currently-outstanding self-allocations, so recordFree's
-  // self-thread branch (which -- unlike recordAlloc -- isn't handed a size
-  // by its caller, see recordFree's comment) knows how much to subtract
-  // from trackerBytes_. Touched by both resolver_ and symbolResolver_ (each
-  // frees what it itself allocated in the common case, but nothing here
-  // assumes that), hence Locked rather than a bare map. Declared, and
-  // therefore constructed, before either Thread member below -- see
-  // constructed_'s comment on why declaration order here is load-bearing.
-  Locked<std::unordered_map<void*, size_t>> trackerLive_;
-
   memory::RotatingBuffer<QueueEntry, QueueCapacity> queue_;
 
   // See parseTrackedModules()'s comment (above, next to warmup()) for the
@@ -732,8 +666,9 @@ private:
   // ever touches resolvedSymbols_ briefly. Uncontended in practice:
   // resolver_ takes it once per drained queue entry, symbolResolver_ takes
   // it once per *resolved* address (far rarer, and each hold is a single
-  // map insert).
-  std::mutex resolvedSymbolsMutex_;
+  // map insert). een::Mutex (not std::mutex), acquired via .acquire()'s RAII
+  // guard.
+  Mutex resolvedSymbolsMutex_;
 
   // Addresses already handed to symResolveQueue_, so a hot call site
   // doesn't get pushed again on every single alloc/free that picks it as
