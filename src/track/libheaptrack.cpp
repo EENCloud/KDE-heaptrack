@@ -37,6 +37,15 @@ namespace {
 // startup and teardown.
 een::PromTracker<> s_model;
 
+// When paused (heaptrack_pause / heaptrack_stop), every hook short-circuits and
+// the model sees nothing -- resume clears it. Cheap atomic check on the hot path.
+std::atomic<bool> s_paused {false};
+
+bool paused()
+{
+    return s_paused.load(std::memory_order_relaxed);
+}
+
 }
 
 extern "C" {
@@ -60,19 +69,37 @@ void heaptrack_init(const char* /*outputFileName*/, heaptrack_callback_t initBef
 
 void heaptrack_stop()
 {
+    // No trace file to flush/close; just stop feeding the model. Its collator
+    // threads are torn down at static destruction.
+    s_paused.store(true, std::memory_order_relaxed);
 }
 
 void heaptrack_pause()
 {
+    s_paused.store(true, std::memory_order_relaxed);
 }
 
 void heaptrack_resume()
 {
+    s_paused.store(false, std::memory_order_relaxed);
 }
 
 void heaptrack_malloc(void* ptr, size_t size)
 {
-    if (s_model.isTrackerThread() || !ptr) return;
+    if (paused() || !ptr) {
+        return;
+    }
+    if (s_model.isTrackerThread()) {
+        // One of our own collator threads allocating for its own bookkeeping.
+        // Book it as intrinsic tracking overhead (an atomic bump) and return
+        // WITHOUT unwinding. Running trace.fill() here for our own allocations
+        // is what wedged the resolver thread: it re-enters this hook on every
+        // hash-map node it allocates and paid a full libunwind stack walk each
+        // time, only to be dropped. Must stay allocation-free here (atomics
+        // only) so it can't recurse back into this hook.
+        s_model.recordTrackerAlloc(size);
+        return;
+    }
 
     Trace trace;
     trace.fill(2 + HEAPTRACK_DEBUG_BUILD * 2);
@@ -81,13 +108,27 @@ void heaptrack_malloc(void* ptr, size_t size)
 
 void heaptrack_free(void* ptr)
 {
-    if (s_model.isTrackerThread() || !ptr) return;
+    if (paused() || !ptr) {
+        return;
+    }
+    if (s_model.isTrackerThread()) {
+        // Our own thread freeing; nothing to record here (we deliberately keep
+        // no ptr->size map for tracker allocations -- that map's own node
+        // allocations are exactly what would re-enter this hook).
+        return;
+    }
     s_model.recordFree(ptr);
 }
 
 void heaptrack_realloc(void* ptr_in, size_t size, void* ptr_out)
 {
-    if (s_model.isTrackerThread() || !ptr) return;
+    if (paused() || !ptr_out) {
+        return;
+    }
+    if (s_model.isTrackerThread()) {
+        s_model.recordTrackerAlloc(size);
+        return;
+    }
 
     // A realloc is a free of the old pointer plus an allocation of the new one.
     Trace trace;

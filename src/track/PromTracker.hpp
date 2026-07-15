@@ -116,39 +116,44 @@ public:
 
   // True when the calling thread is one of this model's own collator threads
   // (resolver_ / symbolResolver_ -- DWARF resolution, hash-map growth,
-  // std::string construction, etc). Their allocations are the model's own
-  // overhead, never application memory, so recordAlloc/recordFree drop them
-  // outright: recording them would re-enter the malloc hook on the same
-  // thread with nothing to catch the recursion, and they're this fork's cost,
-  // not the watched program's. This TID check is the whole exclusion.
+  // std::string construction, etc). The malloc hook (libheaptrack.cpp) checks
+  // this FIRST -- before unwinding -- and routes such allocations to
+  // recordTrackerAlloc instead of recordAlloc, so a collator thread never pays
+  // a stack unwind for, nor re-enters tracking on, its own bookkeeping
+  // allocations. (Doing the unwind first and dropping later is what wedged the
+  // resolver thread in production.)
   //
-  // Guarded by constructed_ so it's a safe `false` when called (via the
-  // malloc hook, from any thread) before this global's constructor has run
-  // or after its destructor has begun: constructed_ is zero-initialized
-  // (false) ahead of dynamic init and reset to false first thing in the
-  // destructor, and the Thread members it reads are only alive in between.
+  // Guarded by constructed_ so it's a safe `false` when called (via the malloc
+  // hook, from any thread) before this global's constructor has run or after
+  // its destructor has begun: constructed_ is zero-initialized (false) ahead
+  // of dynamic init and reset to false first thing in the destructor, and the
+  // Thread members it reads are only alive in between.
   bool isTrackerThread() const {
     if (!constructed_)
       return false;
     return resolver_.id() == TID::current() || symbolResolver_.id() == TID::current();
   }
 
+  // Intrinsic tracking overhead: an allocation made by one of our own collator
+  // threads (see isTrackerThread). Called straight from the malloc hook in
+  // place of recordAlloc, so it MUST be allocation-free and non-blocking --
+  // atomics only, no map, no queue, no unwind -- or it re-enters the hook and
+  // recurses. Cumulative on purpose: we keep no ptr->size map (its node
+  // allocations are exactly the recursion hazard), so this is total bytes/count
+  // this fork's own threads have churned, not a current-outstanding figure.
+  // Published from drainQueue.
+  void recordTrackerAlloc(size_t size) {
+    trackerBytes_.fetch_add(size, std::memory_order_relaxed);
+    trackerAllocs_.fetch_add(1, std::memory_order_relaxed);
+  }
+
   void recordAlloc(void* ptr, size_t size, const Trace& trace) {
     // Any call arriving during/after destruction is a no-op -- see
-    // constructed_.
+    // constructed_. Tracker-thread allocations never reach here: the hook
+    // filters them into recordTrackerAlloc (see isTrackerThread) before this
+    // is ever called.
     if (!constructed_)
       return;
-
-    if (isTrackerThread()) {
-      // Allocation made by one of our own collator threads (resolver_/
-      // symbolResolver_ -- DWARF resolution, hash-map growth, std::string
-      // construction, etc), not by application code. Drop it: it is this
-      // fork's own overhead, not a leak we're hunting. Recording it would
-      // re-enter here anyway (the recording itself allocates), and there is
-      // no longer a global lock to catch that recursion -- the TID check is
-      // the whole exclusion. See isTrackerThread.
-      return;
-    }
 
     if (trace.size() == 0)
       return;
@@ -176,13 +181,8 @@ public:
     if (!constructed_)
       return;
 
-    if (isTrackerThread()) {
-      // Mirror of recordAlloc: our own collator threads' frees are dropped,
-      // never recorded. See there.
-      return;
-    }
-
     // Same reasoning as recordAlloc: must not block or do real work here.
+    // Tracker-thread frees never reach here -- the hook filters them out.
     QueueEntry entry;
     entry.isAlloc = false;
     entry.ptr = ptr;
@@ -260,6 +260,13 @@ private:
   // Drains whatever's queued; returns whether it did any work (so the
   // caller knows whether to sleep before checking again).
   bool drainQueue() {
+    // Publish the intrinsic-overhead counters once per drain cycle, from this
+    // top-level point (safe: never called from inside another prom_metrics
+    // call, unlike the malloc hook that maintains the atomics). See
+    // recordTrackerAlloc.
+    prom_gauge_set_full(trackerBytesGauge_, static_cast<double>(trackerBytes_.load(std::memory_order_relaxed)), emptyLabel());
+    prom_gauge_set_full(trackerAllocsGauge_, static_cast<double>(trackerAllocs_.load(std::memory_order_relaxed)), emptyLabel());
+
     bool did = false;
     while (auto e = queue_.tryPop()) {
       if (e->isAlloc)
@@ -629,6 +636,16 @@ private:
   PromMetric* byLocationAllocCounter_{prom_counter_new("heaptrack_alloc_count_by_location", "allocation count by object+offset (unresolved -- see locLabel)")};
   PromMetric* totalBytesGauge_{prom_gauge_new("heaptrack_leaked_bytes_total", "total outstanding allocated bytes across the whole process")};
   PromMetric* totalAllocCounter_{prom_counter_new("heaptrack_alloc_count_total", "total allocation count across the whole process")};
+
+  // Intrinsic tracking overhead -- cumulative bytes/allocs churned by this
+  // fork's own collator threads (see recordTrackerAlloc), atomically bumped
+  // from the malloc hook and published from drainQueue. Gauges (set to the
+  // running total) rather than counters so the value can be published straight
+  // from the atomic without delta bookkeeping.
+  std::atomic<size_t> trackerBytes_{0};
+  std::atomic<size_t> trackerAllocs_{0};
+  PromMetric* trackerBytesGauge_{prom_gauge_new("heaptrack_tracker_alloc_bytes", "cumulative bytes allocated by the tracking system's own collator threads (DWARF resolution, hash-map growth, etc), not application memory")};
+  PromMetric* trackerAllocsGauge_{prom_gauge_new("heaptrack_tracker_alloc_count", "cumulative allocation count by the tracking system's own collator threads")};
 
   memory::RotatingBuffer<QueueEntry, QueueCapacity> queue_;
 
