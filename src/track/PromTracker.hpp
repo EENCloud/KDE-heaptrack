@@ -174,7 +174,9 @@ public:
     entry.frameCount = static_cast<uint8_t>(std::min(trace.size(), static_cast<int>(MaxAttributionFrames)));
     for (uint8_t i = 0; i < entry.frameCount; ++i)
       entry.frames[i] = reinterpret_cast<uintptr_t>(trace[i]);
-    queue_.tryPush(entry);  // single attempt; false means full, drop it (see comment above)
+    while (!queue_.tryPush(entry)) {
+      if (canceled()) return;
+    }
   }
 
   void recordFree(void* ptr) {
@@ -186,7 +188,9 @@ public:
     QueueEntry entry;
     entry.isAlloc = false;
     entry.ptr = ptr;
-    queue_.tryPush(entry);  // single attempt; false means full, drop it
+    while (!queue_.tryPush(entry)) {
+      if (canceled()) return;
+    }
   }
 
 private:
