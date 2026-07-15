@@ -37,13 +37,6 @@ namespace {
 // startup and teardown.
 een::PromTracker<> s_model;
 
-std::atomic<bool> s_paused {false};
-
-bool paused()
-{
-    return s_paused.load();
-}
-
 }
 
 extern "C" {
@@ -67,26 +60,19 @@ void heaptrack_init(const char* /*outputFileName*/, heaptrack_callback_t initBef
 
 void heaptrack_stop()
 {
-    // No trace file to flush or close; just stop feeding the model. Its collator
-    // threads are torn down at static destruction.
-    s_paused.store(true);
 }
 
 void heaptrack_pause()
 {
-    s_paused.store(true);
 }
 
 void heaptrack_resume()
 {
-    s_paused.store(false);
 }
 
 void heaptrack_malloc(void* ptr, size_t size)
 {
-    if (paused() || !ptr) {
-        return;
-    }
+    if (s_model.isTrackerThread() || !ptr) return;
 
     Trace trace;
     trace.fill(2 + HEAPTRACK_DEBUG_BUILD * 2);
@@ -95,18 +81,13 @@ void heaptrack_malloc(void* ptr, size_t size)
 
 void heaptrack_free(void* ptr)
 {
-    if (paused() || !ptr) {
-        return;
-    }
-
+    if (s_model.isTrackerThread() || !ptr) return;
     s_model.recordFree(ptr);
 }
 
 void heaptrack_realloc(void* ptr_in, size_t size, void* ptr_out)
 {
-    if (paused() || !ptr_out) {
-        return;
-    }
+    if (s_model.isTrackerThread() || !ptr) return;
 
     // A realloc is a free of the old pointer plus an allocation of the new one.
     Trace trace;
