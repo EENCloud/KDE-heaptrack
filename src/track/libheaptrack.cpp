@@ -39,6 +39,7 @@
 #include <string>
 #include <thread>
 
+#include "prom_export.h"
 #include "tracetree.h"
 #include "util/config.h"
 #include "util/libunwind_config.h"
@@ -877,6 +878,13 @@ void heaptrack_malloc(void* ptr, size_t size)
         Trace trace;
         trace.fill(2 + HEAPTRACK_DEBUG_BUILD * 2);
 
+        // Pushed to the lock-free MPSC queue before HeapTrack::op() below ever
+        // takes HeapTrack::s_lock -- promExport's queue needs no external
+        // locking of its own, so it must never run while s_lock is held, or
+        // the resolver thread's own (unrelated) allocations made while
+        // draining that queue can deadlock against whoever holds s_lock.
+        promExport::recordAlloc(ptr, size, trace);
+
         HeapTrack::op(guard, [&](HeapTrack& heaptrack) { heaptrack.handleMalloc(ptr, size, trace); });
     }
 }
@@ -887,6 +895,9 @@ void heaptrack_free(void* ptr)
         RecursionGuard guard;
 
         debugLog<VeryVerboseOutput>("heaptrack_free(%p)", ptr);
+
+        // See heaptrack_malloc: must run before s_lock is taken, same reason.
+        promExport::recordFree(ptr);
 
         HeapTrack::op(guard, [&](HeapTrack& heaptrack) { heaptrack.handleFree(ptr); });
     }

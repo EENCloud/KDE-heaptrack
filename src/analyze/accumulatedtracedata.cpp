@@ -561,22 +561,6 @@ vector<StringIndex> remapStrings(vector<string>& lhs, const vector<string>& rhs)
     return map;
 }
 
-// replace by std::identity once we can leverage C++20
-struct identity
-{
-    template <typename T>
-    const T& operator()(const T& t) const
-    {
-        return t;
-    }
-
-    template <typename T>
-    T operator()(T&& t) const
-    {
-        return std::move(t);
-    }
-};
-
 template <typename IpMapper>
 int compareTraceIndices(const TraceIndex& lhs, const AccumulatedTraceData& lhsData, const TraceIndex& rhs,
                         const AccumulatedTraceData& rhsData, IpMapper ipMapper)
@@ -660,7 +644,7 @@ void AccumulatedTraceData::diff(const AccumulatedTraceData& base)
     // step 1: sort allocations for efficient lookup and to prepare for merging equal allocations
 
     std::sort(allocations.begin(), allocations.end(), [this](const Allocation& lhs, const Allocation& rhs) {
-        return compareTraceIndices(lhs.traceIndex, *this, rhs.traceIndex, *this, identity {}) < 0;
+        return compareTraceIndices(lhs.traceIndex, *this, rhs.traceIndex, *this, std::identity {}) < 0;
     });
 
     // step 2: now merge equal allocations
@@ -668,7 +652,7 @@ void AccumulatedTraceData::diff(const AccumulatedTraceData& base)
     allocations.erase(inplace_unique_reduce(
                           allocations.begin(), allocations.end(),
                           [this](const Allocation& lhs, const Allocation& rhs) {
-                              return compareTraceIndices(lhs.traceIndex, *this, rhs.traceIndex, *this, identity {})
+                              return compareTraceIndices(lhs.traceIndex, *this, rhs.traceIndex, *this, std::identity {})
                                   == 0;
                           },
                           [](Allocation& lhs, const Allocation& rhs) { lhs += rhs; }),

@@ -66,10 +66,17 @@ if (LIBUNWIND_LIBRARY)
   set(CMAKE_REQUIRED_INCLUDES ${CMAKE_REQUIRED_INCLUDES_SAVE})
 endif ()
 
+# Note: LIBUNWIND_HAS_UNW_BACKTRACE is intentionally not a REQUIRED_VARS entry
+# here. The check_c_source_compiles probe for it can fail under some toolchain
+# setups (observed under een-ports' vcpkg toolchain, likely a missing -lpthread
+# on the tiny test program's link line) even when unw_backtrace() genuinely
+# exists and links fine in the real build (confirmed via nm on libunwind.a).
+# trace_libunwind.cpp calls it unconditionally, so a real absence surfaces as
+# a link error at build time instead, which is a more reliable signal than
+# this particular feature-probe.
 include(FindPackageHandleStandardArgs)
 FIND_PACKAGE_HANDLE_STANDARD_ARGS(Libunwind  REQUIRED_VARS  LIBUNWIND_INCLUDE_DIR
                                                             LIBUNWIND_LIBRARY
-                                                            LIBUNWIND_HAS_UNW_BACKTRACE
                                              VERSION_VAR    LIBUNWIND_VERSION_STRING
                                  )
 
