@@ -175,7 +175,7 @@ public:
     for (uint8_t i = 0; i < entry.frameCount; ++i)
       entry.frames[i] = reinterpret_cast<uintptr_t>(trace[i]);
     while (!queue_.tryPush(entry)) {
-      if (canceled()) return;
+      if (!constructed_) return;
     }
   }
 
@@ -189,7 +189,7 @@ public:
     entry.isAlloc = false;
     entry.ptr = ptr;
     while (!queue_.tryPush(entry)) {
-      if (canceled()) return;
+      if (!constructed_) return;
     }
   }
 
@@ -452,7 +452,7 @@ private:
     auto& fileAgg = byFile_[loc.objectPath];
     fileAgg.outstandingBytes += static_cast<double>(e.size);
     if (!fileAgg.label)
-      fileAgg.label = prom_make_label(PROM_FLAG_SORTED, "file", loc.objectPath.c_str(), NULL);
+      fileAgg.label = prom_make_label(PROM_FLAG_SORTED, "module", loc.objectPath.c_str(), NULL);
     prom_gauge_set_full(byFileBytesGauge_, fileAgg.outstandingBytes, fileAgg.label);
     prom_counter_inc_full(byFileAllocCounter_, fileAgg.label);
 
@@ -622,7 +622,7 @@ private:
   // (prom_metrics.c) unconditionally g_slice_new0's a fresh PromMetric and
   // g_tree_replace()'s it into the context's registry under that name,
   // which drops the tree's ref on whatever was previously registered
-  // there. Call prom_gauge_new("heaptrack_leaked_bytes_by_file", ...) more
+  // there. Call prom_gauge_new("heaptrack_leaked_bytes_by_module", ...) more
   // than once (the bug this file originally had, when gauges were created
   // lazily on first touch per distinct file) and every call after the first
   // silently evicts the previous one from the registry -- it keeps a live,
@@ -634,8 +634,8 @@ private:
   // one and only the chronologically-last survived to render, exactly
   // matching this. Creating each of these exactly once, here, at
   // construction, sidesteps the whole class of bug.
-  PromMetric* byFileBytesGauge_{prom_gauge_new("heaptrack_leaked_bytes_by_file", "outstanding allocated bytes by object/binary path (unresolved -- see locLabel)")};
-  PromMetric* byFileAllocCounter_{prom_counter_new("heaptrack_alloc_count_by_file", "allocation count by object/binary path (unresolved -- see locLabel)")};
+  PromMetric* byFileBytesGauge_{prom_gauge_new("heaptrack_leaked_bytes_by_module", "outstanding allocated bytes by object/binary path (unresolved -- see locLabel)")};
+  PromMetric* byFileAllocCounter_{prom_counter_new("heaptrack_alloc_count_by_module", "allocation count by object/binary path (unresolved -- see locLabel)")};
   PromMetric* byLocationBytesGauge_{prom_gauge_new("heaptrack_leaked_bytes_by_location", "outstanding allocated bytes by object+offset (unresolved -- see locLabel)")};
   PromMetric* byLocationAllocCounter_{prom_counter_new("heaptrack_alloc_count_by_location", "allocation count by object+offset (unresolved -- see locLabel)")};
   PromMetric* totalBytesGauge_{prom_gauge_new("heaptrack_leaked_bytes_total", "total outstanding allocated bytes across the whole process")};
@@ -648,8 +648,8 @@ private:
   // from the atomic without delta bookkeeping.
   std::atomic<size_t> trackerBytes_{0};
   std::atomic<size_t> trackerAllocs_{0};
-  PromMetric* trackerBytesGauge_{prom_gauge_new("heaptrack_tracker_alloc_bytes", "cumulative bytes allocated by the tracking system's own collator threads (DWARF resolution, hash-map growth, etc), not application memory")};
-  PromMetric* trackerAllocsGauge_{prom_gauge_new("heaptrack_tracker_alloc_count", "cumulative allocation count by the tracking system's own collator threads")};
+  PromMetric* trackerBytesGauge_{prom_gauge_new("heaptrack_tracker_overhead_bytes", "cumulative bytes allocated by the tracking system's own collator threads (DWARF resolution, hash-map growth, etc), not application memory")};
+  PromMetric* trackerAllocsGauge_{prom_gauge_new("heaptrack_tracker_overhead_count", "cumulative allocation count by the tracking system's own collator threads")};
 
   memory::RotatingBuffer<QueueEntry, QueueCapacity> queue_;
 
