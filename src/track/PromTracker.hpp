@@ -261,6 +261,21 @@ private:
     return trackedModules_.contains(p.filename());
   }
 
+  // HEAPTRACK_RESOLVE_SYMBOLS: toggles whether the symbol-resolver thread ever
+  // does real DWARF resolution at all. Default-on (matches prior behavior).
+  // Set to "0"/"false"/"off" to force every location label to the cheap raw
+  // module+offset form (locLabel) instead of ever submitting to
+  // symResolveQueue_ -- useful for measuring how much CPU/memory the
+  // in-process resolver costs versus resolving addresses externally
+  // afterward (e.g. via heaptrack_leaks against a local copy of the
+  // watched binary + debug info).
+  static bool parseResolveSymbolsEnabled() {
+    opt<std::string> raw = plat::getenv("HEAPTRACK_RESOLVE_SYMBOLS");
+    if (!raw)
+      return true;
+    return !(*raw == "0" || *raw == "false" || *raw == "off");
+  }
+
   // Drains whatever's queued; returns whether it did any work (so the
   // caller knows whether to sleep before checking again).
   bool drainQueue() {
@@ -581,7 +596,7 @@ private:
       // its own comment) -- a found entry is therefore never empty.
       return std::string(it->second.data());
 
-    if (submittedForResolution_.find(address) == submittedForResolution_.end() && isTrackedModule(loc.objectPath)) {
+    if (resolveSymbolsEnabled_ && submittedForResolution_.find(address) == submittedForResolution_.end() && isTrackedModule(loc.objectPath)) {
       // First time this address has reached here: hand it to the symbol
       // resolver thread. Only marked submitted on a *successful* push --
       // see symResolveQueue_'s comment for why a dropped push must NOT be
@@ -660,6 +675,11 @@ private:
   // thread could possibly call isTrackedModule(); nothing below it depends
   // on it in the other direction.
   const std::unordered_set<std::string> trackedModules_{parseTrackedModules()};
+
+  // See parseResolveSymbolsEnabled comment. Declared alongside
+  // trackedModules_ for the same reason: must be initialized before
+  // resolver_/symbolResolver_ start (declaration order matters here).
+  const bool resolveSymbolsEnabled_{parseResolveSymbolsEnabled()};
 
   // address -> resolved symbol text, written by symbolResolver_
   // (resolveSymbol), read by resolver_ (attributionLabel) -- unlike
