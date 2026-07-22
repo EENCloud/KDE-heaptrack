@@ -1,5 +1,6 @@
 name: KDE-heaptrack
 id: ari:cloud:compass:4337fc0d-aa55-4ff9-bd75-ef7117ff9381:component/4c6fdffe-fa4a-46ef-9e6f-a1aa05480c89/f83987c7-3c0d-4bde-9d16-406562f14d7e
+slug: kde-heaptrack
 configVersion: 1
 typeId: SERVICE
 ownerId: ari:cloud:identity::team/02623aed-f05b-4acd-8187-7932552722de-20 # Video - Storage (252)
