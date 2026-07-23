@@ -1,0 +1,17 @@
+{
+  "$een_ports_revision": "7.6",
+  "name": "heaptrack",
+  "version-string": "head",
+  "description": "Heap memory profiler for Linux (EEN fork) — adds live per-file/per-file+line Prometheus leak metrics via libeen, adjunct to the standard offline trace-file output.",
+  "homepage": "https://github.com/EENCloud/KDE-heaptrack",
+  "license": "LGPL-2.1-or-later",
+  "dependencies": [
+    "een-cmake@1.5.9",
+    "zlib@1.3.1",
+    "boost@1.90.0",
+    "elfutils@0.192",
+    "libunwind@1.8.3",
+    "libeen@1.2.32",
+    "libeen-cpp[core]@6.9.0"
+  ]
+}

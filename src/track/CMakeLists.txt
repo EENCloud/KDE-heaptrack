@@ -32,10 +32,15 @@ set_target_properties(heaptrack_env PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/${LIBEXEC_INSTALL_DIR}"
 )
 
-# heaptrack_preload: track a newly started process
-add_library(heaptrack_preload MODULE
-    heaptrack_preload.cpp
-    libheaptrack.cpp
+# heaptrack_preload: track a newly started process.
+#
+# libeen-cpp is a hard, unconditional dependency of this fork: libheaptrack.cpp's
+# core lock is an een::Mutex and its live allocation model (PromTracker) resolves
+# call sites to live Prometheus leak metrics via libeen. een_ports_link resolves
+# these against the exact same libeen/glib build as the process being watched --
+# a second, independently linked glib instance in one process crashes very early.
+een_add_library(heaptrack_preload TYPE SHARED INSTALL
+    FILES heaptrack_preload.cpp libheaptrack.cpp
 )
 
 target_link_libraries(heaptrack_preload LINK_PRIVATE
@@ -45,6 +50,8 @@ target_link_libraries(heaptrack_preload LINK_PRIVATE
     heaptrack_unwind
     rt
 )
+
+een_ports_link(heaptrack_preload PRIVATE libeen cpptrace libeen-cpp[core])
 
 set_target_properties(heaptrack_preload PROPERTIES
     VERSION ${HEAPTRACK_LIB_VERSION}
@@ -70,6 +77,10 @@ target_link_libraries(heaptrack_inject PRIVATE
     rt
     tsl::robin_map
 )
+
+# Same hard libeen-cpp dependency as heaptrack_preload: heaptrack_inject
+# compiles the same libheaptrack.cpp (core lock + live allocation model).
+een_ports_link(heaptrack_inject PRIVATE libeen cpptrace libeen-cpp[core])
 
 set_target_properties(heaptrack_inject PROPERTIES
     VERSION ${HEAPTRACK_LIB_VERSION}
